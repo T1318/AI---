@@ -24,4 +24,6 @@ __pycache__/**
 *.docx
 *.xlsx
 /附件3：训练数据集/**
+/AI----master/**
 *.md
+/test/**

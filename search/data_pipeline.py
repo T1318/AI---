@@ -36,7 +36,8 @@ from torch.utils.data import DataLoader, TensorDataset
 # =============================================================================
 # 配置
 # =============================================================================
-DATA_DIR_DEFAULT = r"C:/Users/23263/Desktop/赛马/数据"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR_DEFAULT = os.path.join(PROJECT_ROOT, "附件3：训练数据集")
 PROJECT_FILES = {
     "A": "训练数据项目A历史数据_2025-04-01_2025-10-31.xlsx",
     "B": "训练数据项目B历史数据_2023-04-01_2023-10-31.xlsx",
@@ -45,8 +46,24 @@ PROJECT_FILES = {
 TARGET_COL = "TotalRealTimeLoad"          # 瞬时冷量：负荷预测的目标列
 _CUMULATIVE_KEYWORDS = ("电度值", "累计")   # 中文参数名含这些字样 → 累计量列，剔除
 _ABS_OUTLIER = 1e6                        # |值|超过它 → 传感器坏点
+_INVALID_VALUES = (-8888.7998, -9999.0, -99999.0)
 _INTERP_5MIN_LIMIT = 6                    # 5分钟级最多插值6步（30分钟）
 _HORIZON = 24                             # 比赛口径：预测未来24小时（固定，不寻优）
+_CACHE_VERSION = "v2"
+
+
+def get_cache_path(project):
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+    return os.path.join(cache_dir, "%s_hourly_%s.csv" % (project, _CACHE_VERSION))
+
+
+def _mask_invalid_values(data):
+    """屏蔽占位值、无穷值和绝对值过大的传感器坏点。"""
+    values = data.to_numpy(dtype=float)
+    invalid = ~np.isfinite(values) | (np.abs(values) > _ABS_OUTLIER)
+    for marker in _INVALID_VALUES:
+        invalid |= np.isclose(values, marker, rtol=0.0, atol=1e-3)
+    return data.mask(invalid), int(invalid.sum())
 
 
 # =============================================================================
@@ -60,8 +77,7 @@ def load_project_hourly(project, data_dir=DATA_DIR_DEFAULT, use_cache=True, verb
     """
     assert project in PROJECT_FILES, "项目必须是 A/B/C，收到 %r" % project
 
-    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
-    cache_path = os.path.join(cache_dir, "%s_hourly.csv" % project)
+    cache_path = get_cache_path(project)
     if use_cache and os.path.exists(cache_path):
         df = pd.read_csv(cache_path, parse_dates=["timeStamp"], index_col="timeStamp")
         if verbose:
@@ -96,12 +112,11 @@ def load_project_hourly(project, data_dir=DATA_DIR_DEFAULT, use_cache=True, verb
     data = data[~data.index.duplicated(keep="first")].sort_index()
 
     # --- 坏点与非法值 ---
-    n_outlier = int((data.abs() > _ABS_OUTLIER).sum().sum())
-    data = data.mask(data.abs() > _ABS_OUTLIER)
+    data, n_outlier = _mask_invalid_values(data)
     if TARGET_COL in data.columns:
         data.loc[data[TARGET_COL] < 0, TARGET_COL] = np.nan
     if verbose:
-        print("[数据] 剔除坏点读数 %d 个（|值|>%.0e）" % (n_outlier, _ABS_OUTLIER))
+        print("[数据] 剔除异常和坏点读数 %d 个" % n_outlier)
 
     # --- 5分钟级插值 + 小时重采样 ---
     data = data.interpolate(method="time", limit=_INTERP_5MIN_LIMIT)
@@ -131,7 +146,7 @@ def load_project_hourly(project, data_dir=DATA_DIR_DEFAULT, use_cache=True, verb
               % (project, len(df), len(hourly), n_before - len(hourly), zero_ratio * 100,
                  hourly.shape[1] - 1))
 
-    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     hourly.to_csv(cache_path)
     if verbose:
         print("[数据] 已缓存至 %s（改清洗规则后请删掉重生成）" % cache_path)

@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from data_processing.data_processing import decompose
+from data_processing.data_processing import decompose, denoise
 
 
 TIME_COLUMN = "timeStamp"
@@ -107,7 +107,7 @@ def _time_features(timestamps: pd.Series) -> pd.DataFrame:
 def wavelet_feature_window(
     window: pd.DataFrame, columns: list[str]
 ) -> tuple[pd.DataFrame, list[str]]:
-    """在单个历史窗口内生成原始值、四路小波分量和时间特征。"""
+    """在单个历史窗口内生成降噪值、四路小波分量和时间特征。"""
     missing_columns = [column for column in columns if column not in window.columns]
     if missing_columns:
         raise ValueError(f"数据缺少小波输入列: {missing_columns}")
@@ -118,8 +118,9 @@ def wavelet_feature_window(
     feature_names = []
     for column in columns:
         signal = window[column].to_numpy(dtype=float)
-        _, components = decompose(signal)
-        arrays.append(signal)
+        denoised_signal = denoise(signal)
+        _, components = decompose(denoised_signal)
+        arrays.append(denoised_signal)
         feature_names.append(column)
         for component_name in ("cA3", "cD3", "cD2", "cD1"):
             arrays.append(components[component_name])
@@ -158,8 +159,11 @@ def build_windows(
     input_hours: int,
     horizon: int,
     wavelet_columns: list[str] | None = None,
+    stride_hours: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """用过去 input_hours 小时预测未来 horizon 小时。"""
+    if stride_hours <= 0:
+        raise ValueError("stride_hours 必须大于0")
     columns = list(wavelet_columns or WAVELET_COLUMNS)
     missing_columns = [column for column in columns if column not in df.columns]
     if missing_columns:
@@ -171,7 +175,7 @@ def build_windows(
     ys = []
     feature_names = None
     sample_count = len(df) - input_hours - horizon + 1
-    for start in range(sample_count):
+    for start in range(0, sample_count, stride_hours):
         block = df.iloc[start : start + input_hours + horizon]
         if not _valid_sample(block, columns):
             continue
