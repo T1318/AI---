@@ -27,3 +27,5 @@ __pycache__/**
 /AI----master/**
 *.md
 /test/**
+
+!/README.md
