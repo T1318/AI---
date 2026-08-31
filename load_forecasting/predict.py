@@ -3,6 +3,7 @@ from argparse import Namespace
 import numpy as np
 import torch
 
+from .checkpoint import load_checkpoint
 from .data import build_latest_window, load_excel
 from .model_registry import build_model
 
@@ -25,7 +26,7 @@ def main() -> None:
         output="prediction_24h.csv",
     )
 
-    checkpoint = torch.load(config.checkpoint, map_location="cpu")
+    checkpoint = load_checkpoint(config.checkpoint, map_location="cpu")
     frame = load_excel(config.data)
     x, feature_names = build_latest_window(
         frame,

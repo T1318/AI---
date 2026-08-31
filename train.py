@@ -9,6 +9,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from load_forecasting.data import WAVELET_COLUMNS, build_windows, load_excel
+from load_forecasting.checkpoint import load_checkpoint
 from load_forecasting.model_registry import (
     DEFAULT_TRAINING_CONFIG,
     build_model,
@@ -241,7 +242,7 @@ def train_model(args: argparse.Namespace, datasets: dict, save_checkpoint=True):
             )
 
     if save_checkpoint:
-        checkpoint = torch.load(output, map_location=device)
+        checkpoint = load_checkpoint(output, map_location=device)
         model.load_state_dict(checkpoint["model"])
     model.eval()
     with torch.no_grad():

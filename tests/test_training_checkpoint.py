@@ -10,6 +10,7 @@ import torch
 from load_forecasting.LoadTransfromer import LoadTransformer
 from load_forecasting.model_registry import build_model
 from load_forecasting.predict import restore_model
+from load_forecasting.checkpoint import load_checkpoint
 from train import (
     build_checkpoint,
     default_config,
@@ -21,6 +22,25 @@ from train import (
 
 
 class TrainingCheckpointTests(unittest.TestCase):
+    def test_checkpoint_loader_disables_weights_only_for_trusted_checkpoint(self):
+        with patch("load_forecasting.checkpoint.torch.load", return_value={"ok": True}) as load:
+            result = load_checkpoint("model.pt", map_location="cpu")
+
+        self.assertEqual(result, {"ok": True})
+        load.assert_called_once_with(
+            "model.pt", map_location="cpu", weights_only=False
+        )
+
+    def test_checkpoint_loader_falls_back_for_old_pytorch(self):
+        with patch(
+            "load_forecasting.checkpoint.torch.load",
+            side_effect=[TypeError("unsupported"), {"ok": True}],
+        ) as load:
+            result = load_checkpoint("model.pt", map_location="cpu")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(load.call_count, 2)
+
     def test_validation_summary_selects_nonzero_mape_not_mse(self):
         datasets = {
             "y_mean": 0.0,
