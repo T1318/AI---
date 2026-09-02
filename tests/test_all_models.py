@@ -12,6 +12,7 @@ from load_forecasting.predict import restore_model
 
 DEEP_MODELS = [
     "LoadTransformer",
+    "LoadTransformerHistoryOnly",
     "lstm",
     "gru",
     "bilstm",
@@ -37,7 +38,12 @@ class AllModelTests(unittest.TestCase):
             with self.subTest(model=model_type):
                 config = default_model_config(model_type, horizon=4)
                 model = build_model(model_type, 8, config)
-                output = model(x)
+                weather = torch.randn(2, 4, 8)
+                output = (
+                    model(x, weather)
+                    if model_type == "LoadTransformer"
+                    else model(x)
+                )
                 self.assertEqual(tuple(output.shape), (2, 4))
                 torch.nn.functional.mse_loss(output, target).backward()
 
@@ -48,7 +54,12 @@ class AllModelTests(unittest.TestCase):
                     "model": model.state_dict(),
                 }
                 restored = restore_model(checkpoint)
-                self.assertEqual(tuple(restored(x).shape), (2, 4))
+                restored_output = (
+                    restored(x, weather)
+                    if model_type == "LoadTransformer"
+                    else restored(x)
+                )
+                self.assertEqual(tuple(restored_output.shape), (2, 4))
 
 
 if __name__ == "__main__":

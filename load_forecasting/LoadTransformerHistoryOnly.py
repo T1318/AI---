@@ -1,9 +1,12 @@
 import math
+
 import torch
 from torch import nn
 
 
-class LoadTransformer(nn.Module):
+class LoadTransformerHistoryOnly(nn.Module):
+    """仅使用历史序列预测未来负荷的 Transformer。"""
+
     def __init__(
         self,
         input_dim,
@@ -12,7 +15,6 @@ class LoadTransformer(nn.Module):
         num_layers=2,
         horizon=24,
         dropout=0.1,
-        future_weather_dim=8,
     ):
         super().__init__()
         self.input_projection = nn.Linear(input_dim, d_model)
@@ -25,20 +27,9 @@ class LoadTransformer(nn.Module):
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
-        self.horizon = horizon
-        self.weather_projection = nn.Linear(future_weather_dim, d_model)
-        self.fusion_head = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.GELU(),
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, 1),
-        )
+        self.output = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, horizon))
 
-    def forward(self, x, future_weather):
-        if future_weather is None:
-            raise ValueError("LoadTransformer 需要未来24小时天气特征")
-        if future_weather.size(1) != self.horizon:
-            raise ValueError("未来天气长度必须与预测范围一致")
+    def forward(self, x):
         length = x.size(1)
         position = torch.arange(length, device=x.device, dtype=x.dtype)
         div = torch.exp(
@@ -56,7 +47,4 @@ class LoadTransformer(nn.Module):
             position[:, None] * div[: encoding[:, 1::2].shape[1]]
         )
         hidden = self.input_projection(x) + encoding.unsqueeze(0)
-        context = self.encoder(hidden)[:, -1]
-        context = context.unsqueeze(1).expand(-1, self.horizon, -1)
-        weather = self.weather_projection(future_weather)
-        return self.fusion_head(torch.cat([context, weather], dim=-1)).squeeze(-1)
+        return self.output(self.encoder(hidden)[:, -1])

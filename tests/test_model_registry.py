@@ -27,7 +27,7 @@ class FirstChoiceTrial:
 
 class ModelRegistryTests(unittest.TestCase):
     def test_registry_contains_all_models_with_one_config_source(self):
-        self.assertEqual(len(SUPPORTED_DEEP_MODEL_TYPES), 11)
+        self.assertEqual(len(SUPPORTED_DEEP_MODEL_TYPES), 12)
         self.assertEqual(set(SUPPORTED_MODEL_TYPES), set(SUPPORTED_DEEP_MODEL_TYPES) | {"xgboost"})
         self.assertEqual(set(MODEL_SPECS), set(SUPPORTED_MODEL_TYPES))
         for spec in MODEL_SPECS.values():
@@ -41,9 +41,21 @@ class ModelRegistryTests(unittest.TestCase):
         for model_type in SUPPORTED_DEEP_MODEL_TYPES:
             with self.subTest(model=model_type):
                 default = default_model_config(model_type, 4)
-                self.assertEqual(tuple(build_model(model_type, 8, default)(x).shape), (2, 4))
+                default_model = build_model(model_type, 8, default)
+                default_output = (
+                    default_model(x, torch.randn(2, 4, 8))
+                    if model_type == "LoadTransformer"
+                    else default_model(x)
+                )
+                self.assertEqual(tuple(default_output.shape), (2, 4))
                 sampled, training = sample_model_configs(trial, model_type, 4)
-                self.assertEqual(tuple(build_model(model_type, 8, sampled)(x).shape), (2, 4))
+                sampled_model = build_model(model_type, 8, sampled)
+                sampled_output = (
+                    sampled_model(x, torch.randn(2, 4, 8))
+                    if model_type == "LoadTransformer"
+                    else sampled_model(x)
+                )
+                self.assertEqual(tuple(sampled_output.shape), (2, 4))
                 self.assertEqual(set(training), set(DEFAULT_TRAINING_CONFIG))
 
     def test_default_training_config_has_no_flat_transformer_fields(self):
@@ -53,7 +65,7 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "nhead"))
         self.assertFalse(hasattr(config, "layers"))
         self.assertEqual(config.training_config, DEFAULT_TRAINING_CONFIG)
-        self.assertEqual(config.output, "outputs/LoadTransformer.pt")
+        self.assertEqual(config.output, "outputs/LoadTransformer_weather.pt")
 
     def test_xgboost_uses_registry_defaults_and_search_space(self):
         spec = MODEL_SPECS["xgboost"]

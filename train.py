@@ -8,7 +8,11 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from load_forecasting.data import WAVELET_COLUMNS, build_windows, load_excel
+from load_forecasting.data import (
+    WAVELET_COLUMNS,
+    build_windows_with_future_weather,
+    load_excel,
+)
 from load_forecasting.checkpoint import load_checkpoint
 from load_forecasting.model_registry import (
     DEFAULT_TRAINING_CONFIG,
@@ -85,6 +89,10 @@ def build_checkpoint(
     x_std,
     y_mean,
     y_std,
+    future_weather_names=None,
+    future_weather_mean=None,
+    future_weather_std=None,
+    weather_noise_std=None,
 ):
     return {
         "checkpoint_version": 1,
@@ -107,6 +115,10 @@ def build_checkpoint(
         "y_std": y_std,
         "input_hours": args.input_hours,
         "horizon": args.horizon,
+        "future_weather_names": list(future_weather_names or []),
+        "future_weather_mean": future_weather_mean,
+        "future_weather_std": future_weather_std,
+        "weather_noise_std": weather_noise_std,
     }
 
 
@@ -138,28 +150,45 @@ def split_time_frames(
     return train_frame, valid_frame, test_frame
 
 
+def add_weather_noise(weather, noise_scale):
+    """只给未来干球、湿球温度加入训练扰动。"""
+    scale = noise_scale.to(device=weather.device, dtype=weather.dtype)
+    return weather + torch.randn_like(weather) * scale.view(1, 1, -1)
+
+
+def forward_model(model_type, model, history, future_weather):
+    if get_model_spec(model_type)["uses_future_weather"]:
+        return model(history, future_weather)
+    return model(history)
+
+
 def prepare_datasets(args: argparse.Namespace) -> dict:
     frame = load_excel(args.data)
     train_frame, valid_frame, test_frame = split_time_frames(
         frame, args.input_hours
     )
-    x_train, y_train, feature_names = build_windows(
+    x_train, weather_train, y_train, feature_names, weather_names = build_windows_with_future_weather(
         train_frame, args.input_hours, args.horizon, WAVELET_COLUMNS,
         stride_hours=1,
     )
-    x_valid, y_valid, valid_feature_names = build_windows(
+    x_valid, weather_valid, y_valid, valid_feature_names, valid_weather_names = build_windows_with_future_weather(
         valid_frame, args.input_hours, args.horizon, WAVELET_COLUMNS,
         stride_hours=24,
     )
-    x_test, y_test, test_feature_names = build_windows(
+    x_test, weather_test, y_test, test_feature_names, test_weather_names = build_windows_with_future_weather(
         test_frame, args.input_hours, args.horizon, WAVELET_COLUMNS,
         stride_hours=24,
     )
     if feature_names != valid_feature_names or feature_names != test_feature_names:
         raise ValueError("训练、验证和测试特征顺序不一致")
+    if weather_names != valid_weather_names or weather_names != test_weather_names:
+        raise ValueError("训练、验证和测试天气特征顺序不一致")
 
     x_mean, x_std = x_train.mean(axis=(0, 1)), x_train.std(axis=(0, 1)) + 1e-6
     y_mean, y_std = y_train.mean(), y_train.std() + 1e-6
+    weather_mean = weather_train.mean(axis=(0, 1))
+    weather_std = weather_train.std(axis=(0, 1)) + 1e-6
+    raw_noise = np.array([1.0, 0.5] + [0.0] * 6, dtype=np.float32)
     return {
         "x_train": ((x_train - x_mean) / x_std).astype(np.float32),
         "y_train": ((y_train - y_mean) / y_std).astype(np.float32),
@@ -167,6 +196,9 @@ def prepare_datasets(args: argparse.Namespace) -> dict:
         "y_valid": ((y_valid - y_mean) / y_std).astype(np.float32),
         "x_test": ((x_test - x_mean) / x_std).astype(np.float32),
         "y_test": ((y_test - y_mean) / y_std).astype(np.float32),
+        "future_weather_train": ((weather_train - weather_mean) / weather_std).astype(np.float32),
+        "future_weather_valid": ((weather_valid - weather_mean) / weather_std).astype(np.float32),
+        "future_weather_test": ((weather_test - weather_mean) / weather_std).astype(np.float32),
         "y_valid_raw": y_valid.astype(np.float32),
         "y_test_raw": y_test.astype(np.float32),
         "feature_names": feature_names,
@@ -175,6 +207,11 @@ def prepare_datasets(args: argparse.Namespace) -> dict:
         "x_std": x_std,
         "y_mean": float(y_mean),
         "y_std": float(y_std),
+        "future_weather_names": weather_names,
+        "future_weather_mean": weather_mean,
+        "future_weather_std": weather_std,
+        "weather_noise_std": raw_noise,
+        "weather_noise_scale": raw_noise / weather_std,
     }
 
 
@@ -184,11 +221,19 @@ def train_model(args: argparse.Namespace, datasets: dict, save_checkpoint=True):
     feature_names = datasets["feature_names"]
 
     train_loader = DataLoader(
-        TensorDataset(torch.from_numpy(datasets["x_train"]), torch.from_numpy(datasets["y_train"])),
+        TensorDataset(
+            torch.from_numpy(datasets["x_train"]),
+            torch.from_numpy(datasets["future_weather_train"]),
+            torch.from_numpy(datasets["y_train"]),
+        ),
         batch_size=args.training_config["batch_size"], shuffle=True,
     )
     valid_loader = DataLoader(
-        TensorDataset(torch.from_numpy(datasets["x_valid"]), torch.from_numpy(datasets["y_valid"])),
+        TensorDataset(
+            torch.from_numpy(datasets["x_valid"]),
+            torch.from_numpy(datasets["future_weather_valid"]),
+            torch.from_numpy(datasets["y_valid"]),
+        ),
         batch_size=args.training_config["batch_size"],
     )
 
@@ -205,17 +250,34 @@ def train_model(args: argparse.Namespace, datasets: dict, save_checkpoint=True):
     output.parent.mkdir(parents=True, exist_ok=True)
     for epoch in range(1, args.epochs + 1):
         model.train()
-        for batch_x, batch_y in train_loader:
+        for batch_x, batch_weather, batch_y in train_loader:
             optimizer.zero_grad()
-            loss_fn(model(batch_x.to(device)), batch_y.to(device)).backward()
+            batch_x = batch_x.to(device)
+            batch_weather = batch_weather.to(device)
+            if get_model_spec(args.model)["uses_future_weather"]:
+                batch_weather = add_weather_noise(
+                    batch_weather,
+                    torch.as_tensor(datasets["weather_noise_scale"]),
+                )
+            prediction = forward_model(
+                args.model, model, batch_x, batch_weather
+            )
+            loss_fn(prediction, batch_y.to(device)).backward()
             optimizer.step()
         model.eval()
 
         predictions = []
         targets = []
         with torch.no_grad():
-            for batch_x, batch_y in valid_loader:
-                predictions.append(model(batch_x.to(device)).cpu().numpy())
+            for batch_x, batch_weather, batch_y in valid_loader:
+                predictions.append(
+                    forward_model(
+                        args.model,
+                        model,
+                        batch_x.to(device),
+                        batch_weather.to(device),
+                    ).cpu().numpy()
+                )
                 targets.append(batch_y.numpy())
         validation = validation_summary(
             np.concatenate(predictions),
@@ -228,6 +290,10 @@ def train_model(args: argparse.Namespace, datasets: dict, save_checkpoint=True):
             model, args, epoch, validation, feature_names,
             datasets["x_mean"], datasets["x_std"],
             datasets["y_mean"], datasets["y_std"],
+            datasets["future_weather_names"],
+            datasets["future_weather_mean"],
+            datasets["future_weather_std"],
+            datasets["weather_noise_std"],
         )
         if save_checkpoint:
             best, _ = save_best_checkpoint(
@@ -246,7 +312,12 @@ def train_model(args: argparse.Namespace, datasets: dict, save_checkpoint=True):
         model.load_state_dict(checkpoint["model"])
     model.eval()
     with torch.no_grad():
-        pred = model(torch.from_numpy(datasets["x_test"]).to(device)).cpu().numpy()
+        pred = forward_model(
+            args.model,
+            model,
+            torch.from_numpy(datasets["x_test"]).to(device),
+            torch.from_numpy(datasets["future_weather_test"]).to(device),
+        ).cpu().numpy()
         pred = pred * datasets["y_std"] + datasets["y_mean"]
     result = metrics(pred, datasets["y_test_raw"])
     print(json.dumps(result, ensure_ascii=False))
@@ -272,7 +343,11 @@ def default_config(model_type="LoadTransformer") -> Namespace:
     model_config = default_model_config(model_type, horizon=24)
     return Namespace(
         data="附件3：训练数据集/训练数据项目A历史数据_2025-04-01_2025-10-31.xlsx",
-        output=f"outputs/{model_type}.pt",
+        output=(
+            "outputs/LoadTransformer_weather.pt"
+            if model_type == "LoadTransformer"
+            else f"outputs/{model_type}.pt"
+        ),
 
         model=model_type,
         model_config=model_config,

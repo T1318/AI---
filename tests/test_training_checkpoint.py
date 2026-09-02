@@ -97,6 +97,10 @@ class TrainingCheckpointTests(unittest.TestCase):
             x_std=np.ones(2),
             y_mean=0.0,
             y_std=1.0,
+            future_weather_names=["OutdoorTdbin", "OutdoorWetTemp"],
+            future_weather_mean=np.zeros(8),
+            future_weather_std=np.ones(8),
+            weather_noise_std=np.array([1.0, 0.5, 0, 0, 0, 0, 0, 0]),
         )
 
         self.assertEqual(checkpoint["checkpoint_version"], 1)
@@ -107,6 +111,13 @@ class TrainingCheckpointTests(unittest.TestCase):
         self.assertEqual(checkpoint["model_type"], "LoadTransformer")
         self.assertEqual(checkpoint["model_config"], model_config)
         self.assertEqual(checkpoint["input_dim"], 2)
+        self.assertEqual(
+            checkpoint["future_weather_names"],
+            ["OutdoorTdbin", "OutdoorWetTemp"],
+        )
+        np.testing.assert_array_equal(
+            checkpoint["future_weather_mean"], np.zeros(8)
+        )
 
     def test_every_validation_improvement_saves_checkpoint(self):
         with patch("train.torch.save") as save:
@@ -137,7 +148,7 @@ class TrainingCheckpointTests(unittest.TestCase):
         }
 
         restored = restore_model(checkpoint)
-        output = restored(torch.randn(2, 24, 7))
+        output = restored(torch.randn(2, 24, 7), torch.randn(2, 12, 8))
 
         self.assertIsInstance(restored, LoadTransformer)
         self.assertEqual(tuple(output.shape), (2, 12))
@@ -158,7 +169,8 @@ class TrainingCheckpointTests(unittest.TestCase):
         y = torch.randn(2, 4)
 
         optimizer.zero_grad()
-        torch.nn.functional.mse_loss(model(x), y).backward()
+        weather = torch.randn(2, 4, 8)
+        torch.nn.functional.mse_loss(model(x, weather), y).backward()
         optimizer.step()
         checkpoint = build_checkpoint(
             model, args, 1,
@@ -178,7 +190,9 @@ class TrainingCheckpointTests(unittest.TestCase):
             _, saved = save_best_checkpoint(path, 0.5, float("inf"), checkpoint)
             loaded = torch.load(path, map_location="cpu")
             restored = restore_model(loaded)
-            prediction = restored(torch.randn(1, 8, 3))
+            prediction = restored(
+                torch.randn(1, 8, 3), torch.randn(1, 4, 8)
+            )
 
         self.assertTrue(saved)
         self.assertEqual(tuple(prediction.shape), (1, 4))

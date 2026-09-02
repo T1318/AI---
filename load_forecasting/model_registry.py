@@ -55,6 +55,11 @@ def _transformer_factory(input_dim, config):
     return LoadTransformer(input_dim=input_dim, **config)
 
 
+def _history_only_transformer_factory(input_dim, config):
+    from .LoadTransformerHistoryOnly import LoadTransformerHistoryOnly
+    return LoadTransformerHistoryOnly(input_dim=input_dim, **config)
+
+
 def _xgboost_factory(input_dim, config):
     from .xgboost_model import XGBoostModel
     return XGBoostModel(**config)
@@ -108,7 +113,8 @@ MODEL_SPECS = {
             "d_model": 64, 
             "nhead": 4, 
             "num_layers": 2, 
-            "dropout": 0.1
+            "dropout": 0.1,
+            "future_weather_dim": 8
             },
         "search_space": {
             "d_model": {"type": "categorical", "choices": [32, 64, 128]},
@@ -116,6 +122,24 @@ MODEL_SPECS = {
             "num_layers": {"type": "int", "low": 1, "high": 4},
             "dropout": {"type": "float", "low": 0.05, "high": 0.5},
             }, 
+        "config_adapter": _identity,
+    },
+
+    "LoadTransformerHistoryOnly": {
+        "kind": "deep",
+        "factory": _history_only_transformer_factory,
+        "defaults": {
+            "d_model": 64,
+            "nhead": 4,
+            "num_layers": 2,
+            "dropout": 0.1,
+        },
+        "search_space": {
+            "d_model": {"type": "categorical", "choices": [32, 64, 128]},
+            "nhead": {"type": "categorical", "choices": [2, 4, 8]},
+            "num_layers": {"type": "int", "low": 1, "high": 4},
+            "dropout": {"type": "float", "low": 0.05, "high": 0.5},
+        },
         "config_adapter": _identity,
     },
 
@@ -293,6 +317,9 @@ MODEL_SPECS = {
 
 SUPPORTED_MODEL_TYPES = tuple(MODEL_SPECS)
 SUPPORTED_DEEP_MODEL_TYPES = tuple(name for name, spec in MODEL_SPECS.items() if spec["kind"] == "deep")
+for _spec in MODEL_SPECS.values():
+    _spec.setdefault("uses_future_weather", False)
+MODEL_SPECS["LoadTransformer"]["uses_future_weather"] = True
 
 
 def get_model_spec(model_type):
@@ -323,7 +350,8 @@ def _suggest(trial, name, spec):
 def sample_model_configs(trial, model_type, horizon=24):
     spec = get_model_spec(model_type)
     sampled = {name: _suggest(trial, name, value) for name, value in spec["search_space"].items()}
-    model_config = spec["config_adapter"](sampled)
+    model_config = default_model_config(model_type, horizon)
+    model_config.update(spec["config_adapter"](sampled))
     if spec["kind"] == "deep":
         model_config["horizon"] = horizon
         training_config = {name: _suggest(trial, name, value) for name, value in TRAINING_SEARCH_SPACE.items()}

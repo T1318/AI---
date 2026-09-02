@@ -38,7 +38,12 @@ class DeepModelTuningTests(unittest.TestCase):
                     trial, model_type, horizon=4
                 )
                 model = build_model(model_type, 8, model_config)
-                self.assertEqual(tuple(model(x).shape), (2, 4))
+                output = (
+                    model(x, torch.randn(2, 4, 8))
+                    if model_type == "LoadTransformer"
+                    else model(x)
+                )
+                self.assertEqual(tuple(output.shape), (2, 4))
                 self.assertNotIn("input_hours", MODEL_SPECS[model_type]["search_space"])
                 self.assertIn(training_config["optimizer"], ("Adam", "AdamW"))
 

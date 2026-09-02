@@ -15,9 +15,11 @@ from load_forecasting.model_registry import (
 )
 from train import (
     apply_tuning_result,
+    add_weather_noise,
     build_optimizer,
     default_config,
     metrics,
+    forward_model,
     prepare_datasets,
     train_model,
 )
@@ -44,25 +46,46 @@ def create_objective(datasets, args):
         )
         loss_fn = nn.MSELoss()
         train_loader = DataLoader(
-            TensorDataset(torch.from_numpy(datasets["x_train"]), torch.from_numpy(datasets["y_train"])),
+            TensorDataset(
+                torch.from_numpy(datasets["x_train"]),
+                torch.from_numpy(datasets["future_weather_train"]),
+                torch.from_numpy(datasets["y_train"]),
+            ),
             batch_size=training["batch_size"], shuffle=True,
         )
         valid_loader = DataLoader(
-            TensorDataset(torch.from_numpy(datasets["x_valid"]), torch.from_numpy(datasets["y_valid"])),
+            TensorDataset(
+                torch.from_numpy(datasets["x_valid"]),
+                torch.from_numpy(datasets["future_weather_valid"]),
+                torch.from_numpy(datasets["y_valid"]),
+            ),
             batch_size=training["batch_size"],
         )
         best_value, best_epoch, best_metrics = float("inf"), 0, None
         for epoch in range(1, args.epochs + 1):
             model.train()
-            for x, y in train_loader:
-                x, y = x.to(device), y.to(device)
+            for x, weather, y in train_loader:
+                x, weather, y = x.to(device), weather.to(device), y.to(device)
+                if args.model == "LoadTransformer":
+                    weather = add_weather_noise(
+                        weather,
+                        torch.as_tensor(datasets["weather_noise_scale"]),
+                    )
                 optimizer.zero_grad()
-                loss_fn(model(x), y).backward()
+                loss_fn(forward_model(args.model, model, x, weather), y).backward()
                 optimizer.step()
             model.eval()
             with torch.no_grad():
                 pred = np.concatenate(
-                    [model(x.to(device)).cpu().numpy() for x, _ in valid_loader]
+                    [
+                        forward_model(
+                            args.model,
+                            model,
+                            x.to(device),
+                            weather.to(device),
+                        ).cpu().numpy()
+                        for x, weather, _ in valid_loader
+                    ]
                 )
             current = metrics(
                 pred * datasets["y_std"] + datasets["y_mean"],

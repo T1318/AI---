@@ -223,7 +223,7 @@ class LoadForecastingTests(unittest.TestCase):
     @unittest.skipIf(torch is None, "当前环境未安装 torch")
     def test_load_transformer_outputs_24_predictions(self):
         model = LoadTransformer(input_dim=8, d_model=16, nhead=4, num_layers=1, horizon=24)
-        output = model(torch.randn(2, 5, 8))
+        output = model(torch.randn(2, 5, 8), torch.randn(2, 24, 8))
 
         self.assertEqual(tuple(output.shape), (2, 24))
 

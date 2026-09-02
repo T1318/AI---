@@ -14,6 +14,7 @@
 → 在每个历史窗口内逐列 denoise
 → 对降噪结果执行三级 db4 小波分解
 → 生成降噪值、cA3、cD3、cD2、cD1 和时间特征
+→ Transformer 同时接收未来 24 小时天气预报
 → 使用过去 168 小时预测未来 24 小时
 ```
 
@@ -22,6 +23,16 @@
 ```text
 22 个关键变量 × 5 个特征 + 6 个时间特征 = 116
 ```
+
+`LoadTransformer` 额外接收未来天气：
+
+```text
+历史输入：(batch, 168, 116)
+未来天气：(batch, 24, 8)
+输出负荷：(batch, 24)
+```
+
+未来天气的 8 个特征为干球温度、湿球温度和 6 个时间正余弦编码。其他深度模型与 XGBoost 继续使用原 116 维单输入。
 
 训练窗口每次滑动 1 小时；验证和测试窗口每次滑动 24 小时。数据在构造窗口前按时间切分，避免训练、验证和测试目标重叠。
 
@@ -55,6 +66,13 @@ AI 节能/
 │   ├── cnn_kan_model.py           CNN + KAN
 │   ├── cnn_kan_attention_model.py CNN + KAN + Attention
 │   └── xgboost_model.py           XGBoost 多输出包装器
+├── equipment_forecasting/
+│   ├── targets.py                 28个设备目标、24维控制计划和运行掩码
+│   ├── data.py                    设备预测窗口与控制计划CSV接口
+│   ├── model.py                   共享编码器、多设备输出头Transformer
+│   ├── metrics.py                 逐参数和设备分组指标
+│   ├── train.py                   设备模型训练与XGBoost基线
+│   └── predict.py                 设备参数预测入口
 ├── search/
 │   ├── tune_deep_models.py        11 个深度模型统一 Optuna 寻优入口
 │   ├── data_pipeline.py           旧模型对比实验的数据管线
@@ -143,8 +161,8 @@ python train.py
 默认输出：
 
 ```text
-outputs/LoadTransformer.pt
-outputs/LoadTransformer.csv
+outputs/LoadTransformer_weather.pt
+outputs/LoadTransformer_weather.csv
 ```
 
 ### 训练其他深度模型
@@ -276,10 +294,21 @@ python -m load_forecasting.predict
 ```python
 config = Namespace(
     data="最新数据.xlsx",
-    checkpoint="outputs/LoadTransformer.pt",
+    weather="future_weather_24h.csv",
+    checkpoint="outputs/LoadTransformer_weather.pt",
     output="prediction_24h.csv",
 )
 ```
+
+Transformer 的天气预报 CSV 必须正好包含连续 24 小时：
+
+```csv
+timeStamp,OutdoorTdbin,OutdoorWetTemp
+2026-09-01 01:00:00,31.2,25.1
+2026-09-01 02:00:00,30.8,24.9
+```
+
+第 1 条时间必须是历史运行数据最后有效时刻之后 1 小时。
 
 输入 Excel 必须包含训练使用的关键列，并至少提供最近连续 168 小时数据。程序会自动：
 
@@ -288,6 +317,7 @@ config = Namespace(
 → 小时聚合
 → 查找最近连续 168 小时
 → denoise 和 decompose
+→ 读取并校验未来 24 小时干球、湿球温度预报
 → 使用检查点中的训练统计量标准化
 → 根据检查点恢复模型
 → 输出未来 24 小时负荷
@@ -299,9 +329,9 @@ config = Namespace(
 prediction_24h.csv
 ```
 
-共 24 行，第 1 行表示最后数据时刻之后第 1 小时，第 24 行表示之后第 24 小时。
+共 24 行并包含 `timeStamp` 和 `TotalRealTimeLoad`，第 1 行表示最后数据时刻之后第 1 小时，第 24 行表示之后第 24 小时。
 
-其他深度模型使用相同预测入口，只需修改检查点路径：
+其他深度模型仍使用单输入，不要求天气 CSV；预测入口会根据检查点中的模型类型自动判断，只需修改检查点路径：
 
 ```python
 checkpoint="outputs/lstm.pt"
@@ -312,6 +342,60 @@ checkpoint="outputs/lstm.pt"
 ```python
 checkpoint="outputs/lstm_tuned.pt"
 ```
+
+## 设备运行参数预测
+
+任务二使用：
+
+```text
+过去168小时历史状态
++ 未来24小时负荷、天气和已知控制计划
+→ 未来24小时、28个设备运行参数
+```
+
+未来控制计划包含负荷、干球/湿球温度、时间编码、3台冷机启停和供水温度设定、冷冻水泵/冷却水泵/冷却塔频率。
+
+训练：
+
+```bash
+python -m equipment_forecasting.train
+```
+
+默认检查点：
+
+```text
+outputs/equipment_response.pt
+```
+
+预测前准备 `future_control_plan_24h.csv`，包含24条连续小时记录和以下基础列：
+
+```text
+timeStamp
+TotalRealTimeLoad
+OutdoorTdbin
+OutdoorWetTemp
+ChillerOn01/02/03
+ChChWTempSupplySetPoint01/02/03
+PriChWPVSDFreq01/02/03
+CWPVSDFreq01/02/03
+CTVSDFreq01/02/03
+```
+
+预测：
+
+```bash
+python -m equipment_forecasting.predict
+```
+
+输出：
+
+```text
+equipment_prediction_24h.csv
+```
+
+模型输出28个设备参数，并根据 `ChRealtimeEfficiencyKW` 派生 `COP01/02/03`。COP公式只有在效率字段单位确认为 `kW/RT` 时才具有物理意义。
+
+设备模型按冷机、水泵、冷却塔和系统温差四组计算掩码 Huber Loss；关闭设备的效率和无意义温差不参与损失。模块同时提供逐目标 XGBoost 和 MultiOutput XGBoost 基线函数。
 
 ## 测试
 
@@ -402,3 +486,4 @@ YYYY-MM-DD HH:MM:SS
 - 降噪和小波分解必须限制在当前历史窗口内部，禁止对全量数据预处理后再切分。
 - MAE 和 RMSE 使用全部时段；MAPE 只统计真实负荷非零时段。
 - 测试集不得参与超参数选择，只在最终模型评估时使用。
+- Transformer 天气融合层改变了模型结构，旧的 `LoadTransformer.pt` 权重不能直接用于新模型，必须重新训练。
