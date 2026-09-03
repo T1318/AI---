@@ -57,6 +57,13 @@ def _time_features(timestamps):
     })
 
 
+def _chiller_on_values(df, index):
+    for name in (f"ChillerOn0{index}", f"ChAMPS0{index}"):
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce").to_numpy()
+    raise KeyError(f"缺少冷机{index}启停字段")
+
+
 def build_future_control_plan(df):
     result = pd.DataFrame(index=range(len(df)))
     for name in ["TotalRealTimeLoad", "OutdoorTdbin", "OutdoorWetTemp"]:
@@ -66,7 +73,7 @@ def build_future_control_plan(df):
     )
     for i in range(1, 4):
         planned_name = f"ChAMPS0{i}"
-        values = pd.to_numeric(df[planned_name], errors="coerce").to_numpy()
+        values = _chiller_on_values(df, i)
         result[planned_name] = (values > 1e-6).astype(np.float32)
     for prefix in (
         "ChChWTempSupplySetPoint", "PriChWPVSDFreq",
@@ -120,7 +127,7 @@ def derive_equipment_targets(df):
 def build_equipment_masks(df):
     masks = np.ones((len(df), len(EQUIPMENT_TARGET_NAMES)), dtype=np.float32)
     for i in range(1, 4):
-        on = (pd.to_numeric(df[f"ChAMPS0{i}"], errors="coerce").to_numpy() > 1e-6)
+        on = _chiller_on_values(df, i) > 1e-6
         masks[:, 3 + i - 1] = on
         masks[:, 6 + i - 1] = on
         masks[:, 9 + i - 1] = on
@@ -144,10 +151,7 @@ def build_equipment_masks(df):
 
 
 def build_masks_from_control_plan(plan_df):
-    raw = plan_df.copy()
-    for i in range(1, 4):
-        raw[f"ChAMPS0{i}"] = raw[f"ChAMPS0{i}"]
-    return build_equipment_masks(raw)
+    return build_equipment_masks(plan_df)
 
 
 def efficiency_to_cop(efficiency):

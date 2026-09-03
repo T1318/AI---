@@ -6,6 +6,7 @@ from load_forecasting.model_registry import (
     MODEL_SPECS,
     SUPPORTED_DEEP_MODEL_TYPES,
     build_model,
+    get_model_spec,
     sample_model_configs,
 )
 
@@ -40,7 +41,7 @@ class DeepModelTuningTests(unittest.TestCase):
                 model = build_model(model_type, 8, model_config)
                 output = (
                     model(x, torch.randn(2, 4, 8))
-                    if model_type == "LoadTransformer"
+                    if get_model_spec(model_type)["uses_future_weather"]
                     else model(x)
                 )
                 self.assertEqual(tuple(output.shape), (2, 4))

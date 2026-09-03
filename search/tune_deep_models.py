@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from load_forecasting.model_registry import (
     SUPPORTED_DEEP_MODEL_TYPES,
     build_model,
+    get_model_spec,
     sample_model_configs,
 )
 from train import (
@@ -66,7 +67,7 @@ def create_objective(datasets, args):
             model.train()
             for x, weather, y in train_loader:
                 x, weather, y = x.to(device), weather.to(device), y.to(device)
-                if args.model == "LoadTransformer":
+                if get_model_spec(args.model)["uses_future_weather"]:
                     weather = add_weather_noise(
                         weather,
                         torch.as_tensor(datasets["weather_noise_scale"]),

@@ -6,6 +6,7 @@ from load_forecasting.model_registry import (
     SUPPORTED_DEEP_MODEL_TYPES,
     build_model,
     default_model_config,
+    get_model_spec,
 )
 from load_forecasting.predict import restore_model
 
@@ -13,6 +14,7 @@ from load_forecasting.predict import restore_model
 DEEP_MODELS = [
     "LoadTransformer",
     "LoadTransformerHistoryOnly",
+    "LoadTransformerEncoderDecoder",
     "lstm",
     "gru",
     "bilstm",
@@ -41,7 +43,7 @@ class AllModelTests(unittest.TestCase):
                 weather = torch.randn(2, 4, 8)
                 output = (
                     model(x, weather)
-                    if model_type == "LoadTransformer"
+                    if get_model_spec(model_type)["uses_future_weather"]
                     else model(x)
                 )
                 self.assertEqual(tuple(output.shape), (2, 4))
@@ -56,7 +58,7 @@ class AllModelTests(unittest.TestCase):
                 restored = restore_model(checkpoint)
                 restored_output = (
                     restored(x, weather)
-                    if model_type == "LoadTransformer"
+                    if get_model_spec(model_type)["uses_future_weather"]
                     else restored(x)
                 )
                 self.assertEqual(tuple(restored_output.shape), (2, 4))

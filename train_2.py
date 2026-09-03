@@ -10,15 +10,15 @@ from torch.utils.data import DataLoader, TensorDataset
 from load_forecasting.checkpoint import load_checkpoint
 from load_forecasting.data import WAVELET_COLUMNS, load_excel
 from train import build_optimizer, split_time_frames
-from .equipment_forecasting.data import build_equipment_windows
-from .equipment_forecasting.metrics import grouped_metrics
-from .equipment_forecasting.model import (
+from equipment_forecasting.data import build_equipment_windows
+from equipment_forecasting.metrics import grouped_metrics
+from equipment_forecasting.model import (
     EquipmentResponseTransformer,
     apply_physical_constraints,
     concat_outputs,
     grouped_masked_huber_loss,
 )
-from .equipment_forecasting.targets import EQUIPMENT_TARGET_NAMES, FUTURE_PLAN_NAMES
+from equipment_forecasting.targets import EQUIPMENT_TARGET_NAMES, FUTURE_PLAN_NAMES
 
 
 def default_config():

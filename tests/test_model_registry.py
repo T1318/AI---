@@ -9,6 +9,7 @@ from load_forecasting.model_registry import (
     SUPPORTED_MODEL_TYPES,
     build_model,
     default_model_config,
+    get_model_spec,
     sample_model_configs,
 )
 from train import default_config
@@ -27,7 +28,7 @@ class FirstChoiceTrial:
 
 class ModelRegistryTests(unittest.TestCase):
     def test_registry_contains_all_models_with_one_config_source(self):
-        self.assertEqual(len(SUPPORTED_DEEP_MODEL_TYPES), 12)
+        self.assertEqual(len(SUPPORTED_DEEP_MODEL_TYPES), 13)
         self.assertEqual(set(SUPPORTED_MODEL_TYPES), set(SUPPORTED_DEEP_MODEL_TYPES) | {"xgboost"})
         self.assertEqual(set(MODEL_SPECS), set(SUPPORTED_MODEL_TYPES))
         for spec in MODEL_SPECS.values():
@@ -44,7 +45,7 @@ class ModelRegistryTests(unittest.TestCase):
                 default_model = build_model(model_type, 8, default)
                 default_output = (
                     default_model(x, torch.randn(2, 4, 8))
-                    if model_type == "LoadTransformer"
+                    if get_model_spec(model_type)["uses_future_weather"]
                     else default_model(x)
                 )
                 self.assertEqual(tuple(default_output.shape), (2, 4))
@@ -52,7 +53,7 @@ class ModelRegistryTests(unittest.TestCase):
                 sampled_model = build_model(model_type, 8, sampled)
                 sampled_output = (
                     sampled_model(x, torch.randn(2, 4, 8))
-                    if model_type == "LoadTransformer"
+                    if get_model_spec(model_type)["uses_future_weather"]
                     else sampled_model(x)
                 )
                 self.assertEqual(tuple(sampled_output.shape), (2, 4))

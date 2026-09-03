@@ -60,6 +60,11 @@ def _history_only_transformer_factory(input_dim, config):
     return LoadTransformerHistoryOnly(input_dim=input_dim, **config)
 
 
+def _encoder_decoder_transformer_factory(input_dim, config):
+    from .LoadTransformerEncoderDecoder import LoadTransformerEncoderDecoder
+    return LoadTransformerEncoderDecoder(input_dim=input_dim, **config)
+
+
 def _xgboost_factory(input_dim, config):
     from .xgboost_model import XGBoostModel
     return XGBoostModel(**config)
@@ -141,6 +146,26 @@ MODEL_SPECS = {
             "dropout": {"type": "float", "low": 0.05, "high": 0.5},
         },
         "config_adapter": _identity,
+    },
+
+    "LoadTransformerEncoderDecoder": {
+        "kind": "deep",
+        "factory": _encoder_decoder_transformer_factory,
+        "defaults": {
+            "d_model": 64,
+            "nhead": 4,
+            "num_layers": 2,
+            "dropout": 0.1,
+            "future_weather_dim": 8,
+        },
+        "search_space": {
+            "d_model": {"type": "categorical", "choices": [32, 64, 128]},
+            "nhead": {"type": "categorical", "choices": [2, 4, 8]},
+            "num_layers": {"type": "int", "low": 1, "high": 3},
+            "dropout": {"type": "float", "low": 0.05, "high": 0.5},
+        },
+        "config_adapter": _identity,
+        "uses_future_weather": True,
     },
 
     "lstm": {
