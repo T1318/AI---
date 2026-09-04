@@ -10,7 +10,7 @@
 项目 Excel（5 分钟数据）
 → 删除说明行、解析时间、处理异常值
 → 有限插值并聚合为小时数据
-→ 按时间切分训练/验证/测试集
+→ 按月份执行扩展窗口交叉验证
 → 在每个历史窗口内逐列 denoise
 → 对降噪结果执行三级 db4 小波分解
 → 生成降噪值、cA3、cD3、cD2、cD1 和时间特征
@@ -24,7 +24,7 @@
 22 个关键变量 × 5 个特征 + 6 个时间特征 = 116
 ```
 
-`LoadTransformer` 额外接收未来天气：
+`LoadTransformer` 和 `LoadTransformerEncoderDecoder` 额外接收未来天气：
 
 ```text
 历史输入：(batch, 168, 116)
@@ -32,9 +32,9 @@
 输出负荷：(batch, 24)
 ```
 
-未来天气的 8 个特征为干球温度、湿球温度和 6 个时间正余弦编码。其他深度模型与 XGBoost 继续使用原 116 维单输入。
+未来天气的 8 个特征为干球温度、湿球温度和 6 个时间正余弦编码。`LoadTransformerHistoryOnly` 和其他深度模型继续使用原 116 维单输入。
 
-训练窗口每次滑动 1 小时；验证和测试窗口每次滑动 24 小时。数据在构造窗口前按时间切分，避免训练、验证和测试目标重叠。
+训练窗口每次滑动 1 小时；验证和测试窗口每次滑动 24 小时。默认依次执行“4～6月训练→7月验证、4～7月训练→8月验证、4～8月训练→9月验证”，再用 4～9 月训练并在 10 月测试。所有数据均在构造窗口前按时间切分。
 
 ## 项目结构
 
@@ -42,6 +42,8 @@
 AI 节能/
 ├── train.py                       深度模型统一训练入口
 ├── train_xgboost.py               XGBoost 独立训练和寻优入口
+├── evaluate_test.py               独立测试集预测、指标和曲线输出
+├── evaluate_test.ipynb            测试集评价 Notebook
 ├── AGENTS.md                      仓库协作与开发规范
 ├── README.md                      项目说明和运行指南
 ├── data_processing/
@@ -53,6 +55,8 @@ AI 节能/
 │   ├── data.py                    Excel 清洗、小时聚合、小波特征和窗口构造
 │   ├── model_registry.py          模型、默认参数和搜索空间的唯一配置源
 │   ├── LoadTransfromer.py         Transformer 模型（保持当前文件拼写）
+│   ├── LoadTransformerHistoryOnly.py 仅历史输入 Transformer
+│   ├── LoadTransformerEncoderDecoder.py Encoder-Decoder Transformer
 │   ├── checkpoint.py              跨 PyTorch 版本加载可信检查点
 │   ├── predict.py                 深度模型预测入口
 │   ├── lstm_model.py              LSTM
@@ -71,10 +75,10 @@ AI 节能/
 │   ├── data.py                    设备预测窗口与控制计划CSV接口
 │   ├── model.py                   共享编码器、多设备输出头Transformer
 │   ├── metrics.py                 逐参数和设备分组指标
-│   ├── train.py                   设备模型训练与XGBoost基线
 │   └── predict.py                 设备参数预测入口
+├── train_2.py                     设备模型训练与XGBoost基线
 ├── search/
-│   ├── tune_deep_models.py        11 个深度模型统一 Optuna 寻优入口
+│   ├── tune_deep_models.py        13 个深度模型统一 Optuna 寻优入口
 │   ├── data_pipeline.py           旧模型对比实验的数据管线
 │   └── data_interface.py          XGBoost/序列数据接口
 ├── tests/                         单元测试和 CPU 冒烟测试
@@ -116,6 +120,8 @@ python -c "import torch; print(torch.__version__); print(torch.version.cuda); pr
 
 ```text
 LoadTransformer
+LoadTransformerHistoryOnly
+LoadTransformerEncoderDecoder
 lstm
 gru
 bilstm
@@ -139,76 +145,92 @@ python -c "from load_forecasting.model_registry import SUPPORTED_MODEL_TYPES; pr
 
 ## 深度模型训练
 
-### 训练默认 Transformer
+### 默认滚动三折训练
 
 ```bash
 python train.py
 ```
 
-默认配置：
+默认使用 `LoadTransformer` 和 `rolling_monthly_cv` 策略：
 
 ```text
-模型：LoadTransformer
-输入窗口：168 小时
-预测范围：24 小时
-训练轮数：1000
-设备：auto（CUDA 可用时使用 GPU，否则使用 CPU）
-优化器：AdamW
-学习率：1e-3
-批次：64
+Fold 1：4～6月训练 → 7月验证
+Fold 2：4～7月训练 → 8月验证
+Fold 3：4～8月训练 → 9月验证
+→ 汇总三折平均非零MAPE
+→ 取三折最佳epoch的中位数
+→ 4～9月重新训练
+→ 10月独立测试
+```
+
+训练窗口每次滑动 1 小时，验证和测试窗口每次滑动 24 小时。每个 Fold 都重新初始化模型，不能接续上一折权重。
+
+指定模型训练：
+
+```python
+from train import SAMPLING_ROLLING_MONTHLY_CV, default_config, run
+
+config = default_config(
+    "LoadTransformerEncoderDecoder",
+    SAMPLING_ROLLING_MONTHLY_CV,
+)
+config.epochs = 100
+config.device = "auto"
+run(config)
+```
+
+输出包括最终模型、10月测试预测和三折汇总：
+
+```text
+outputs/LoadTransformerEncoderDecoder.pt
+outputs/LoadTransformerEncoderDecoder.csv
+outputs/LoadTransformerEncoderDecoder_cv.json
+```
+
+### 使用全部数据训练最终模型
+
+全量策略将 4～10 月全部窗口用于训练，没有验证集和测试集。模型训练固定轮数并保存最后一轮，适合超参数和训练轮数已经确定后的最终预测模型。
+
+```python
+import json
+from train import (
+    SAMPLING_ALL_TRAIN,
+    apply_tuning_result,
+    default_config,
+    run,
+)
+
+model_type = "LoadTransformerEncoderDecoder"
+result_path = f"optuna_results/{model_type}_rolling_cv_A_best.json"
+
+config = default_config(model_type, SAMPLING_ALL_TRAIN)
+apply_tuning_result(config, result_path)
+
+with open(result_path, encoding="utf-8") as file:
+    tuning_result = json.load(file)
+
+config.epochs = tuning_result["best_epoch"]
+config.device = "auto"
+run(config)
 ```
 
 默认输出：
 
 ```text
-outputs/LoadTransformer_weather.pt
-outputs/LoadTransformer_weather.csv
+outputs/LoadTransformerEncoderDecoder_all_train.pt
 ```
 
-### 训练其他深度模型
-
-```bash
-python -c "from train import default_config, run; run(default_config('lstm'))"
-python -c "from train import default_config, run; run(default_config('gru'))"
-python -c "from train import default_config, run; run(default_config('bilstm'))"
-python -c "from train import default_config, run; run(default_config('seq2seq'))"
-python -c "from train import default_config, run; run(default_config('kan'))"
-python -c "from train import default_config, run; run(default_config('kan_lstm'))"
-python -c "from train import default_config, run; run(default_config('cnn_lstm'))"
-python -c "from train import default_config, run; run(default_config('cnn_lstm_attention'))"
-python -c "from train import default_config, run; run(default_config('cnn_kan'))"
-python -c "from train import default_config, run; run(default_config('cnn_kan_attention'))"
-```
-
-### 自定义训练参数
+该检查点使用 `selection_metric="final_epoch"`，不包含验证或测试指标。暂时没有寻优结果时，也可以手动设置模型参数、学习率和固定训练轮数。
 
 ```python
-from train import default_config, run
+from train import SAMPLING_ALL_TRAIN, default_config, run
 
-config = default_config("lstm")
+config = default_config("lstm", SAMPLING_ALL_TRAIN)
 config.epochs = 100
-config.device = "auto"
-config.training_config["batch_size"] = 32
+config.model_config["hidden_size"] = 128
+config.training_config["batch_size"] = 64
 config.training_config["lr"] = 5e-4
-config.training_config["optimizer"] = "AdamW"
-config.training_config["weight_decay"] = 1e-4
-
 run(config)
-```
-
-训练损失使用 MSE。每轮同时计算验证 MSE 和原始单位的非零 MAPE，只有验证集非零 MAPE 改善时才覆盖保存最佳检查点。
-
-检查点记录：
-
-```text
-模型类型和模型参数
-训练参数
-最佳 epoch
-最佳验证 MAPE
-验证 MSE
-标准化均值和标准差
-特征名称和小波列
-输入窗口与预测长度
 ```
 
 ## 深度模型超参数搜索
@@ -223,33 +245,55 @@ python -m search.tune_deep_models --model 模型名
 
 ```bash
 python -m search.tune_deep_models --model LoadTransformer
+python -m search.tune_deep_models --model LoadTransformerHistoryOnly
+python -m search.tune_deep_models --model LoadTransformerEncoderDecoder
 python -m search.tune_deep_models --model lstm
-python -m search.tune_deep_models --model cnn_lstm_attention
-python -m search.tune_deep_models --model cnn_kan_attention
 ```
 
-默认寻优设置：
+默认设置：
 
 ```text
-trial 数量：20
-每个 trial 最多：30 轮
-输入窗口：固定 168 小时
-目标：验证集非零 MAPE 最小
+trial数量：20
+每个Fold最多训练：30轮
+每组参数训练：3个独立Fold模型
+优化目标：三折平均非零MAPE最小
+训练损失：MSE
 剪枝器：MedianPruner
 ```
 
-寻优时数据处理和小波特征只计算一次，所有 trial 复用相同训练/验证数组。测试集只在寻优结束后的最终训练中使用。
-
-输出示例：
+每个 Trial 的流程：
 
 ```text
-optuna_results/lstm_A.db
-optuna_results/lstm_A_best.json
-outputs/lstm_tuned.pt
-outputs/lstm_tuned.csv
+同一组模型和训练参数
+→ Fold 1训练并记录7月最佳MAPE和epoch
+→ Fold 2重新初始化并记录8月结果
+→ Fold 3重新初始化并记录9月结果
+→ 返回三折平均MAPE
 ```
 
-SQLite 数据库支持断点续跑。再次运行相同模型命令会继续使用原 study，并新增 trial。
+寻优结束后，程序取三折最佳epoch的中位数，使用最佳参数训练4～9月，并在10月测试一次。不会自动执行4～10月全量训练。
+
+以 Encoder-Decoder Transformer 为例，输出为：
+
+```text
+optuna_results/LoadTransformerEncoderDecoder_rolling_cv_A.db
+optuna_results/LoadTransformerEncoderDecoder_rolling_cv_A_best.json
+outputs/LoadTransformerEncoderDecoder_tuned.pt
+outputs/LoadTransformerEncoderDecoder_tuned.csv
+```
+
+最优参数JSON包含：
+
+```text
+model_config
+training_config
+fold_valid_mapes
+fold_best_epochs
+best_epoch（中位数）
+best_value（三折平均非零MAPE）
+```
+
+SQLite数据库支持断点续跑。新的三折Study名称包含 `rolling_cv`，不会与旧单折数据库混用。由于每个 Trial 训练3次，耗时大约是原单折寻优的3倍。
 
 ## XGBoost 训练与寻优
 
@@ -331,7 +375,7 @@ prediction_24h.csv
 
 共 24 行并包含 `timeStamp` 和 `TotalRealTimeLoad`，第 1 行表示最后数据时刻之后第 1 小时，第 24 行表示之后第 24 小时。
 
-其他深度模型仍使用单输入，不要求天气 CSV；预测入口会根据检查点中的模型类型自动判断，只需修改检查点路径：
+历史版及其他单输入模型不要求天气 CSV；预测入口会根据检查点中的模型类型自动判断，只需修改检查点路径：
 
 ```python
 checkpoint="outputs/lstm.pt"
@@ -342,6 +386,29 @@ checkpoint="outputs/lstm.pt"
 ```python
 checkpoint="outputs/lstm_tuned.pt"
 ```
+
+## 独立测试集评价
+
+测试集结构与训练集一致时，可以使用命令行脚本：
+
+```bash
+python evaluate_test.py \
+  --checkpoint outputs/LoadTransformerEncoderDecoder_tuned.pt \
+  --data "你的测试集.xlsx" \
+  --output-dir outputs/test_evaluation \
+  --device auto
+```
+
+也可以逐单元运行 `evaluate_test.ipynb`。测试窗口每次移动24小时，输出总体指标、h+1～h+24分步指标和真实/预测负荷曲线。
+
+```text
+outputs/test_evaluation/predictions.csv
+outputs/test_evaluation/metrics.json
+outputs/test_evaluation/metrics_by_horizon.csv
+outputs/test_evaluation/load_curve.png
+```
+
+暂时用训练集代替测试集只能验证代码流程，不能代表模型对新数据的泛化性能。
 
 ## 设备运行参数预测
 
@@ -358,7 +425,7 @@ checkpoint="outputs/lstm_tuned.pt"
 训练：
 
 ```bash
-python -m equipment_forecasting.train
+python train_2.py
 ```
 
 默认检查点：
@@ -408,7 +475,7 @@ python -m unittest discover -s tests -v
 编译检查：
 
 ```bash
-python -m compileall -q load_forecasting search train.py train_xgboost.py tests
+python -m compileall -q load_forecasting search train.py train_2.py train_xgboost.py evaluate_test.py tests
 ```
 
 测试覆盖：
@@ -418,7 +485,8 @@ python -m compileall -q load_forecasting search train.py train_xgboost.py tests
 denoise → decompose 顺序
 小波重构
 滑动窗口和时间切分
-11 个深度模型前向、反向和检查点恢复
+13 个深度模型前向、反向和检查点恢复
+三折扩展窗口切分、平均MAPE和最佳epoch中位数
 单一模型注册表和搜索空间
 最佳非零 MAPE 检查点
 PyTorch 新旧版本检查点加载
@@ -431,6 +499,7 @@ XGBoost 多输出训练、保存和恢复
 outputs/*.pt              深度模型最佳检查点
 outputs/*.csv             测试集真实值与预测值
 outputs/*.joblib          XGBoost 模型
+outputs/*_cv.json         三折验证和10月测试汇总
 optuna_results/*.db       Optuna SQLite 试验记录
 optuna_results/*_best.json 最佳超参数
 prediction_24h.csv        未来 24 小时预测

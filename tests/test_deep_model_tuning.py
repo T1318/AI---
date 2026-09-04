@@ -1,6 +1,10 @@
 import unittest
+from argparse import Namespace
+from unittest.mock import patch
 
 import torch
+
+from search.tune_deep_models import create_objective
 
 from load_forecasting.model_registry import (
     MODEL_SPECS,
@@ -12,6 +16,9 @@ from load_forecasting.model_registry import (
 
 
 class FirstChoiceTrial:
+    def __init__(self):
+        self.user_attrs = {}
+
     def suggest_categorical(self, name, choices):
         return choices[0]
 
@@ -21,8 +28,43 @@ class FirstChoiceTrial:
     def suggest_float(self, name, low, high, log=False):
         return low
 
+    def report(self, value, step):
+        pass
+
+    def should_prune(self):
+        return False
+
+    def set_user_attr(self, name, value):
+        self.user_attrs[name] = value
+
 
 class DeepModelTuningTests(unittest.TestCase):
+    def test_objective_averages_three_independent_fold_results(self):
+        trial = FirstChoiceTrial()
+        args = Namespace(
+            model="LoadTransformerHistoryOnly",
+            horizon=4,
+            epochs=1,
+            device="cpu",
+        )
+        prepared = {"folds": [{"name": f"fold_{i}"} for i in range(1, 4)]}
+        fold_results = [
+            {"best_valid_mape": 30.0, "best_epoch": 10},
+            {"best_valid_mape": 20.0, "best_epoch": 30},
+            {"best_valid_mape": 40.0, "best_epoch": 20},
+        ]
+
+        with patch(
+            "search.tune_deep_models.train_trial_fold",
+            side_effect=fold_results,
+        ) as train_fold:
+            value = create_objective(prepared, args)(trial)
+
+        self.assertEqual(value, 30.0)
+        self.assertEqual(train_fold.call_count, 3)
+        self.assertEqual(trial.user_attrs["best_epoch"], 20)
+        self.assertEqual(trial.user_attrs["fold_best_epochs"], [10, 30, 20])
+
     def test_every_deep_model_has_search_space(self):
         self.assertEqual(
             {name for name, spec in MODEL_SPECS.items() if spec["kind"] == "deep"},
