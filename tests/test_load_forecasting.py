@@ -90,11 +90,11 @@ class LoadForecastingTests(unittest.TestCase):
         )
         calls = []
 
-        def fake_denoise(signal):
+        def fake_denoise(signal, wavelet="db4", level=3):
             calls.append("denoise")
             return signal + 10
 
-        def fake_decompose(signal):
+        def fake_decompose(signal, wavelet="db4", level=3):
             calls.append(("decompose", signal.copy()))
             components = {
                 "cA3": signal,

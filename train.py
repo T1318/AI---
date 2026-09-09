@@ -10,6 +10,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from load_forecasting.data import (
+    TIME_COLUMN,
     WAVELET_COLUMNS,
     build_windows_with_future_weather,
     load_excel,
@@ -25,9 +26,11 @@ from load_forecasting.model_registry import (
 
 SAMPLING_ALL_TRAIN = "all_train"
 SAMPLING_ROLLING_MONTHLY_CV = "rolling_monthly_cv"
+SAMPLING_JULY16_HOLDOUT = "july16_holdout"
 SUPPORTED_SAMPLING_STRATEGIES = (
     SAMPLING_ALL_TRAIN,
     SAMPLING_ROLLING_MONTHLY_CV,
+    SAMPLING_JULY16_HOLDOUT,
 )
 
 
@@ -132,13 +135,18 @@ def build_checkpoint(
         "input_dim": len(feature_names),
         "model": model.state_dict(),
         "feature_names": list(feature_names),
-        "wavelet_columns": list(WAVELET_COLUMNS),
+        "wavelet_columns": list(
+            getattr(args, "wavelet_columns", WAVELET_COLUMNS)
+        ),
         "x_mean": x_mean,
         "x_std": x_std,
         "y_mean": y_mean,
         "y_std": y_std,
         "input_hours": args.input_hours,
         "horizon": args.horizon,
+        "wavelet": getattr(args, "wavelet", "db4"),
+        "wavelet_level": getattr(args, "wavelet_level", 3),
+        "evaluation_mode": getattr(args, "evaluation_mode", None),
         "future_weather_names": list(future_weather_names or []),
         "future_weather_mean": future_weather_mean,
         "future_weather_std": future_weather_std,
@@ -180,6 +188,8 @@ def split_sampling_frames(frame, input_hours, strategy):
         return frame.reset_index(drop=True), None, None
     if strategy == SAMPLING_ROLLING_MONTHLY_CV:
         raise ValueError("滚动月度交叉验证包含三折，请使用专用切分函数")
+    if strategy == SAMPLING_JULY16_HOLDOUT:
+        raise ValueError("7月16日隔离验证需要同时提供预测长度")
     raise ValueError(f"未知采样策略: {strategy}")
 
 
@@ -239,6 +249,22 @@ def split_final_evaluation_frames(frame, input_hours):
     )
 
 
+def split_july16_holdout_frames(frame, input_hours, horizon=24):
+    """隔离7月16日作为验证目标，并从训练数据删除该日。"""
+    year = int(frame[TIME_COLUMN].iloc[0].year)
+    holdout_start = pd.Timestamp(year=year, month=7, day=16)
+    holdout_end = holdout_start + pd.Timedelta(hours=horizon)
+    context_start = holdout_start - pd.Timedelta(hours=input_hours)
+    valid_frame = _period_frame(frame, context_start, holdout_end)
+    if len(valid_frame) != input_hours + horizon:
+        raise ValueError("7月16日验证窗口时间不连续或数据不完整")
+    timestamps = frame[TIME_COLUMN]
+    train_frame = frame.loc[
+        ~((timestamps >= holdout_start) & (timestamps < holdout_end))
+    ].reset_index(drop=True)
+    return train_frame, valid_frame
+
+
 def cv_summary(fold_results):
     """汇总三折平均验证MAPE和最佳轮数中位数。"""
     return {
@@ -268,8 +294,9 @@ def _prepare_dataset_from_frames(
     args, train_frame, valid_frame=None, test_frame=None
 ):
     """用训练段拟合标准化参数，并转换可选的验证段和测试段。"""
+    wavelet_columns = getattr(args, "wavelet_columns", WAVELET_COLUMNS)
     x_train, weather_train, y_train, feature_names, weather_names = build_windows_with_future_weather(
-        train_frame, args.input_hours, args.horizon, WAVELET_COLUMNS,
+        train_frame, args.input_hours, args.horizon, wavelet_columns,
         stride_hours=1,
     )
     x_mean, x_std = x_train.mean(axis=(0, 1)), x_train.std(axis=(0, 1)) + 1e-6
@@ -297,7 +324,7 @@ def _prepare_dataset_from_frames(
     }
     if valid_frame is not None:
         x_valid, weather_valid, y_valid, valid_feature_names, valid_weather_names = build_windows_with_future_weather(
-            valid_frame, args.input_hours, args.horizon, WAVELET_COLUMNS,
+            valid_frame, args.input_hours, args.horizon, wavelet_columns,
             stride_hours=24,
         )
         if feature_names != valid_feature_names:
@@ -312,7 +339,7 @@ def _prepare_dataset_from_frames(
         })
     if test_frame is not None:
         x_test, weather_test, y_test, test_feature_names, test_weather_names = build_windows_with_future_weather(
-            test_frame, args.input_hours, args.horizon, WAVELET_COLUMNS,
+            test_frame, args.input_hours, args.horizon, wavelet_columns,
             stride_hours=24,
         )
         if feature_names != test_feature_names:
@@ -335,6 +362,19 @@ def prepare_datasets(args: argparse.Namespace) -> dict:
             frame, args.input_hours, args.sampling_strategy
         )
         return _prepare_dataset_from_frames(args, train_frame)
+    if args.sampling_strategy == SAMPLING_JULY16_HOLDOUT:
+        train_frame, valid_frame = split_july16_holdout_frames(
+            frame, args.input_hours, args.horizon
+        )
+        datasets = _prepare_dataset_from_frames(
+            args, train_frame, valid_frame=valid_frame
+        )
+        datasets["validation_timestamps"] = (
+            valid_frame[TIME_COLUMN]
+            .iloc[args.input_hours : args.input_hours + args.horizon]
+            .to_numpy()[None, ...]
+        )
+        return datasets
     if args.sampling_strategy != SAMPLING_ROLLING_MONTHLY_CV:
         raise ValueError(f"未知采样策略: {args.sampling_strategy}")
 
@@ -536,6 +576,47 @@ def train_model(args: argparse.Namespace, datasets: dict, save_checkpoint=True):
         ],
     }
     if not has_test:
+        validation_output = getattr(args, "validation_output", None)
+        if save_checkpoint and validation_output:
+            with torch.no_grad():
+                validation_prediction = forward_model(
+                    args.model,
+                    model,
+                    torch.from_numpy(datasets["x_valid"]).to(device),
+                    torch.from_numpy(
+                        datasets["future_weather_valid"]
+                    ).to(device),
+                ).cpu().numpy()
+            validation_prediction = (
+                validation_prediction * datasets["y_std"]
+                + datasets["y_mean"]
+            )
+            actual = datasets["y_valid_raw"]
+            predicted_flat = validation_prediction.reshape(-1)
+            actual_flat = actual.reshape(-1)
+            error = predicted_flat - actual_flat
+            nonzero = np.abs(actual_flat) > 1e-6
+            ape = np.full(actual_flat.shape, np.nan, dtype=float)
+            ape[nonzero] = (
+                np.abs(error[nonzero]) / np.abs(actual_flat[nonzero]) * 100
+            )
+            detail = pd.DataFrame({
+                "timeStamp": pd.to_datetime(
+                    datasets["validation_timestamps"].reshape(-1)
+                ),
+                "actual_load": actual_flat,
+                "predicted_load": predicted_flat,
+                "error": error,
+                "absolute_error": np.abs(error),
+                "ape_percent": ape,
+            })
+            validation_path = Path(validation_output)
+            validation_path.parent.mkdir(parents=True, exist_ok=True)
+            detail.to_csv(
+                validation_path,
+                index=False,
+                date_format="%Y-%m-%d %H:%M:%S",
+            )
         return model, validation_result
     with torch.no_grad():
         pred = forward_model(
@@ -625,6 +706,7 @@ def default_config(
 
         model=model_type,
         model_config=model_config,
+        wavelet_columns=list(WAVELET_COLUMNS),
         input_hours=168,
         horizon=24,
         epochs=1000,
